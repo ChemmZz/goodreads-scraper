@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Ignore the folder where the HTML is saved
+files/
+data_cache/
+
+# Ignore private environment variables
+.env
+
+# Ignore Mac system files
+.DS_Store
