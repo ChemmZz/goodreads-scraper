@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ENV_FILE = ".env"
+
 
 class RateLimiter:
     def __init__(self, min_delay=2, max_delay=15):
@@ -33,7 +35,74 @@ class RateLimiter:
 limiter = RateLimiter(min_delay=3, max_delay=7)
 
 
-def get_html(url, retries=3):
+def format_env_value(value):
+    escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped_value}"'
+
+
+def save_env_value(key, value, env_file=ENV_FILE):
+    new_line = f"{key}={format_env_value(value)}\n"
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    lines = []
+
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    updated = False
+    new_lines = []
+    for line in lines:
+        if key_pattern.match(line):
+            new_lines.append(new_line)
+            updated = True
+        else:
+            new_lines.append(line)
+
+    if not updated:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] = f"{new_lines[-1]}\n"
+        new_lines.append(new_line)
+
+    with open(env_file, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+    os.environ[key] = value
+
+
+def get_goodreads_user_id():
+    user_id = os.getenv("GOODREADS_USER", "").strip()
+    if not user_id:
+        user_id = input("Enter Goodreads ID: ").strip()
+
+    if not user_id:
+        raise ValueError("Goodreads user ID is required.")
+
+    if not os.getenv("GOODREADS_USER", "").strip():
+        save_env_value("GOODREADS_USER", user_id)
+        print("Saved Goodreads ID to .env for future runs.")
+
+    return user_id
+
+
+def get_goodreads_cookie():
+    my_cookie = os.getenv("my_cookie", "").strip()
+    if my_cookie:
+        return my_cookie
+
+    print("\nGoodreads requires your browser Cookie header.")
+    print("Paste the full Cookie value from a Goodreads request.")
+    my_cookie = input("Goodreads Cookie: ").strip()
+
+    if not my_cookie:
+        raise ValueError("Goodreads cookie is required to access your shelves.")
+
+    save_env_value("my_cookie", my_cookie)
+    print("Saved Goodreads cookie to .env for future runs.")
+
+    return my_cookie
+
+
+def get_html(url, my_cookie, retries=3):
     """
     Fetches HTML with a retry mechanism and custom timeout.
     """
@@ -44,7 +113,6 @@ def get_html(url, retries=3):
         try:
             limiter.wait()
 
-            my_cookie = os.getenv("my_cookie")
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
                 "Cookie": my_cookie,
@@ -134,11 +202,15 @@ def extract_bookshelves(tree):
     return bookshelves
 
 
-def fetch_or_load(filename, url, refresh=False):
+def fetch_or_load(filename, url, my_cookie, refresh=False):
     # Only fetch if the file doesn't exist OR if we explicitly ask for a refresh
     if not os.path.exists(filename) or refresh:
         print("Fetching fresh data from Goodreads...")
-        html = get_html(url)
+        html = get_html(url, my_cookie)
+        if html is None:
+            raise RuntimeError(
+                f"Could not fetch {url}. Check your Goodreads cookie and try again."
+            )
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html)
     else:
@@ -236,7 +308,7 @@ def populate_csv(books, csv_filename="csv_files/shelves.csv"):
         writer.writerows(books)  # Write data rows
 
 
-def scrape_info_from_user_page(user_id):
+def scrape_info_from_user_page(user_id, my_cookie):
     """
     Extract name and list of dict with the user's (populated) bookshelves
 
@@ -251,7 +323,7 @@ def scrape_info_from_user_page(user_id):
     filename = f"html_files/user_{user_id}.html"
     url = f"https://www.goodreads.com/user/show/{user_id}"
 
-    html = fetch_or_load(filename, url, refresh=False)
+    html = fetch_or_load(filename, url, my_cookie, refresh=False)
     tree = parse_html(html)
 
     name = extract_user_name(tree)
@@ -261,14 +333,14 @@ def scrape_info_from_user_page(user_id):
     return name, bookshelves
 
 
-def scrape_bookshelf(name, bookshelf):
+def scrape_bookshelf(name, bookshelf, my_cookie):
     counter = 1
     filename = (
         f"html_files/{name}_{bookshelf['name']}_{bookshelf['count']}_{counter}.html"
     )
     url = bookshelf["link"]
 
-    html = fetch_or_load(filename, url)
+    html = fetch_or_load(filename, url, my_cookie)
     tree = parse_html(html)
 
     books = extract_books(tree, bookshelf)
@@ -280,7 +352,7 @@ def scrape_bookshelf(name, bookshelf):
         )
         url = get_next_page_url(tree)
 
-        html = fetch_or_load(filename, url)
+        html = fetch_or_load(filename, url, my_cookie)
         tree = parse_html(html)
 
         books.extend(extract_books(tree, bookshelf))
@@ -322,10 +394,11 @@ def main():
     for folder in ["html_files", "csv_files"]:
         os.makedirs(folder, exist_ok=True)
 
-    # Get Profile Data (User Name & Bookshelves)
-    user_id = os.getenv("GOODREADS_USER") or input("Enter Goodreads ID: ")
     try:
-        name, bookshelves = scrape_info_from_user_page(user_id)
+        # Get Profile Data (User Name & Bookshelves)
+        user_id = get_goodreads_user_id()
+        my_cookie = get_goodreads_cookie()
+        name, bookshelves = scrape_info_from_user_page(user_id, my_cookie)
 
         # Feedback for user:
         print(f"\nExtracting Data for User: {name}")
@@ -337,7 +410,7 @@ def main():
         all_books = []
 
         for shelf in bookshelves:
-            all_books.extend(scrape_bookshelf(name, shelf))
+            all_books.extend(scrape_bookshelf(name, shelf, my_cookie))
 
         populate_csv(all_books)
 
